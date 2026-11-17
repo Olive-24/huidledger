@@ -1,0 +1,184 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper Functions ───────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function userRole() {
+      return getUserData().role;
+    }
+
+    function isJeweller() {
+      return isSignedIn() && userRole() == 'jeweller';
+    }
+
+    function isOperator() {
+      return isSignedIn() && userRole() == 'operator';
+    }
+
+    function isAuditor() {
+      return isSignedIn() && userRole() == 'auditor';
+    }
+
+    function getBatch(batchId) {
+      return get(/databases/$(database)/documents/batches/$(batchId)).data;
+    }
+
+    // Forward status progression enforcement
+    function isValidStatusTransition(oldStatus, newStatus) {
+      return (oldStatus == 'submitted' && newStatus == 'received') ||
+             (oldStatus == 'received' && newStatus == 'tested') ||
+             (oldStatus == 'tested' && newStatus == 'hallmarked') ||
+             (oldStatus == 'hallmarked' && newStatus == 'returned');
+    }
+
+    // ── users/{uid} ────────────────────────────────────────────────
+    match /users/{uid} {
+      // Users can read their own profile; auditors can view all profiles
+      allow read: if isOwner(uid) || isAuditor();
+
+      // Users can only create their own profile with an allowed role
+      allow create: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.role in ['jeweller', 'operator', 'auditor'];
+
+      // Profile updates allowed, but role and UID can NEVER be modified
+      allow update: if isOwner(uid)
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.uid == uid;
+
+      allow delete: if false;
+    }
+
+    // ── config/app ─────────────────────────────────────────────────
+    match /config/app {
+      // Any authenticated user can read app configuration (fees, thresholds)
+      allow read: if isSignedIn();
+      // Client writes are strictly prohibited (managed via backend/console)
+      allow write: if false;
+    }
+
+    // ── batches/{batchId} ──────────────────────────────────────────
+    match /batches/{batchId} {
+      // Jeweller reads own; operator reads assigned or unassigned submitted; auditor reads all
+      allow read: if isAuditor()
+        || (isJeweller() && resource.data.jewellerId == request.auth.uid)
+        || (isOperator() && (
+            resource.data.operatorId == request.auth.uid ||
+            (resource.data.operatorId == null && resource.data.status == 'submitted')
+          ));
+
+      // Jeweller can only create batches with own UID and initial status 'submitted'
+      allow create: if isJeweller()
+        && request.resource.data.jewellerId == request.auth.uid
+        && request.resource.data.status == 'submitted'
+        && request.resource.data.operatorId == null;
+
+      // Operator updates: claiming batch or progressing status
+      allow update: if isOperator() && (
+        // Case 1: Claiming an unassigned submitted batch
+        (resource.data.status == 'submitted'
+         && request.resource.data.status == 'received'
+         && resource.data.operatorId == null
+         && request.resource.data.operatorId == request.auth.uid)
+        ||
+        // Case 2: Progressing status forward (received -> tested -> hallmarked -> returned)
+        (resource.data.operatorId == request.auth.uid
+         && isValidStatusTransition(resource.data.status, request.resource.data.status))
+        ||
+        // Case 3: Updating counters/status history while keeping status unchanged
+        (resource.data.operatorId == request.auth.uid
+         && request.resource.data.status == resource.data.status)
+      )
+      // Jeweller identity and batch code are immutable
+      && request.resource.data.jewellerId == resource.data.jewellerId
+      && request.resource.data.batchCode == resource.data.batchCode;
+
+      allow delete: if false;
+
+      // ── Subcollection: batches/{batchId}/items/{itemId} ───────────
+      match /items/{itemId} {
+        // Read allowed if user can view parent batch
+        allow read: if isAuditor()
+          || (isJeweller() && getBatch(batchId).jewellerId == request.auth.uid)
+          || (isOperator() && (
+              getBatch(batchId).operatorId == request.auth.uid ||
+              (getBatch(batchId).operatorId == null && getBatch(batchId).status == 'submitted')
+            ));
+
+        // Jeweller can add items only while batch status is 'submitted'
+        allow create: if isJeweller()
+          && getBatch(batchId).jewellerId == request.auth.uid
+          && getBatch(batchId).status == 'submitted'
+          && request.resource.data.result == 'pending';
+
+        allow update: if (
+          // Jeweller editing article details while batch is submitted
+          (isJeweller()
+            && getBatch(batchId).jewellerId == request.auth.uid
+            && getBatch(batchId).status == 'submitted')
+          ||
+          // Jeweller linking invoice number on an already hallmarked/returned batch
+          (isJeweller()
+            && getBatch(batchId).jewellerId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['invoiceNo', 'updatedAt']))
+          ||
+          // Operator recording testing results (received or tested stage only)
+          (isOperator()
+            && getBatch(batchId).operatorId == request.auth.uid
+            && (getBatch(batchId).status == 'received' || getBatch(batchId).status == 'tested')
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['result', 'huid', 'rejectionReason', 'updatedAt'])
+            && (
+              (request.resource.data.result == 'hallmarked'
+                && request.resource.data.huid.matches('^[A-Z0-9]{6}$')
+                && request.resource.data.rejectionReason == null)
+              ||
+              (request.resource.data.result == 'rejected'
+                && request.resource.data.rejectionReason.size() >= 3
+                && request.resource.data.huid == null)
+              ||
+              (request.resource.data.result == 'pending'
+                && request.resource.data.huid == null
+                && request.resource.data.rejectionReason == null)
+            ))
+        );
+
+        // Jeweller can delete items only while batch status is 'submitted'
+        allow delete: if isJeweller()
+          && getBatch(batchId).jewellerId == request.auth.uid
+          && getBatch(batchId).status == 'submitted';
+      }
+    }
+
+    // ── publicHuids/{huid} ─────────────────────────────────────────
+    match /publicHuids/{huid} {
+      // Anyone (including unauthenticated public visitors) can fetch a single HUID verification
+      allow get: if true;
+      // Scraping the full collection is strictly denied
+      allow list: if false;
+
+      // Operator creates public verification record upon hallmarking (migrates to Cloud Functions in Phase 4)
+      allow create: if isOperator()
+        && request.resource.data.huid == huid
+        && huid.matches('^[A-Z0-9]{6}$');
+
+      allow update, delete: if isOperator();
+    }
+
+    // ── Default Deny ───────────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

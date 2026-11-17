@@ -1,0 +1,29 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Article photos stored under batch-photos/{userId}/...
+    match /batch-photos/{userId}/{allPaths=**} {
+      // Any authenticated user (jewellers, operators, auditors) can view article photos
+      allow read: if isSignedIn();
+
+      // Users can only upload into their own folder, must be an image, max 2MB
+      allow write: if isSignedIn()
+        && request.auth.uid == userId
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size <= 2 * 1024 * 1024;
+
+      // Users can delete their own uploaded photos
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Deny all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
