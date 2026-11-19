@@ -38,22 +38,28 @@ function mapAuthError(code: string): string {
   switch (code) {
     case "auth/user-not-found":
     case "auth/invalid-credential":
-      return "No account found with that email, or password is incorrect.";
+      return "No account found with this email, or password is incorrect. (If you haven't created an account yet, please click 'Sign up' below!)";
     case "auth/wrong-password":
       return "Incorrect password. Please try again.";
     case "auth/email-already-in-use":
-      return "An account with this email already exists.";
+      return "An account with this email already exists. Please Sign In instead.";
     case "auth/too-many-requests":
       return "Too many failed attempts. Please wait a few minutes and try again.";
     case "auth/weak-password":
       return "Password must be at least 6 characters.";
     case "auth/invalid-email":
       return "Please enter a valid email address.";
+    case "auth/operation-not-allowed":
+      return "Email/Password provider is not enabled in Firebase. Please enable it in Firebase Console -> Authentication -> Sign-in method.";
+    case "auth/unauthorized-domain":
+      return "This domain is not authorized in Firebase. Please add your Vercel domain under Firebase Console -> Authentication -> Settings -> Authorized domains.";
     case "auth/api-key-not-valid":
     case "auth/invalid-api-key":
-      return "Firebase API Key is missing or invalid in .env.local. Switched to Demo Mode.";
+      return "Firebase API Key is missing or invalid in environment settings.";
     default:
-      return "Authentication failed. Please check your credentials.";
+      return code
+        ? `Authentication error (${code}). Please check credentials or Firebase setup.`
+        : "Authentication failed. Please check your credentials.";
   }
 }
 
@@ -72,25 +78,43 @@ async function fetchUserProfile(uid: string): Promise<UserProfile | null> {
   };
 }
 
+export function loginAsDemoUser(email: string): UserProfile | null {
+  const normEmail = email.trim().toLowerCase();
+  const user = MOCK_USERS.find((u) => u.email === normEmail);
+  if (!user) return null;
+  if (typeof window !== "undefined") {
+    localStorage.setItem(MOCK_SESSION_KEY, JSON.stringify(user.uid));
+  }
+  notifyMockListeners(user);
+  return user;
+}
+
 export function subscribeToAuth(callback: (user: UserProfile | null) => void): () => void {
+  mockAuthListeners.add(callback);
+
   if (!isFirebaseConfigured()) {
     callback(getMockStoredUser());
-    mockAuthListeners.add(callback);
     return () => mockAuthListeners.delete(callback);
   }
 
-  return onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
+  const unsubFirebase = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
     if (!firebaseUser) {
-      callback(null);
+      const mock = getMockStoredUser();
+      callback(mock);
       return;
     }
     try {
       const profile = await fetchUserProfile(firebaseUser.uid);
-      callback(profile);
+      callback(profile ?? getMockStoredUser());
     } catch {
       callback(getMockStoredUser());
     }
   });
+
+  return () => {
+    mockAuthListeners.delete(callback);
+    unsubFirebase();
+  };
 }
 
 export async function logIn(email: string, password: string): Promise<UserProfile> {
@@ -119,6 +143,7 @@ export async function logIn(email: string, password: string): Promise<UserProfil
     if (!profile) throw new AppError("Account exists in Auth, but profile document is missing in Firestore.");
     return profile;
   } catch (e: unknown) {
+    console.error("[Auth Error]:", e);
     if (e instanceof AppError) throw e;
     const code = (e as { code?: string }).code ?? "";
     // If API key is invalid, fall back to mock
@@ -207,6 +232,7 @@ export async function signUp(data: {
 
     return profile;
   } catch (e: unknown) {
+    console.error("[SignUp Error]:", e);
     if (e instanceof AppError) throw e;
     const code = (e as { code?: string }).code ?? "";
     throw new AppError(mapAuthError(code));

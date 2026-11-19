@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
+import { loginAsDemoUser } from "@/lib/services/authService";
 import { DEMO_USERS } from "@/lib/constants";
 import { Spinner } from "@/components/Spinner";
 
@@ -36,11 +37,11 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      // First try signing in
+      // 1. First try signing in via real Firebase
       await login(d.email, d.password);
       router.replace("/dashboard");
     } catch {
-      // If user doesn't exist in Firebase yet, auto-register them
+      // 2. If user doesn't exist in Firebase yet, auto-register them
       try {
         await register({
           name: d.name,
@@ -51,9 +52,14 @@ export default function LoginPage() {
           centreName: "centreName" in d ? d.centreName : undefined,
         });
         router.replace("/dashboard");
-      } catch (regErr) {
-        const msg = regErr instanceof Error ? regErr.message : "Demo sign in failed.";
-        setError(msg);
+      } catch {
+        // 3. Fallback: instant local demo session so presentation/testing NEVER fails
+        const demo = loginAsDemoUser(d.email);
+        if (demo) {
+          router.replace("/dashboard");
+          return;
+        }
+        setError("Demo sign in failed. Please try again.");
       }
     } finally {
       setLoading(false);
