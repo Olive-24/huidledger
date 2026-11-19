@@ -1,0 +1,7 @@
+# Tell Vercel to ignore Firebase Cloud Functions and rules (these are deployed via Firebase CLI, not Vercel)
+functions/
+firebase.json
+.firebaserc
+firestore.rules
+firestore.indexes.json
+storage.rules
