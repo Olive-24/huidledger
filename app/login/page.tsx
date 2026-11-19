@@ -9,7 +9,7 @@ import { DEMO_USERS } from "@/lib/constants";
 import { Spinner } from "@/components/Spinner";
 
 export default function LoginPage() {
-  const { login, register } = useAuth();
+  const { login } = useAuth();
   const router = useRouter();
 
   const [email, setEmail] = useState("");
@@ -33,34 +33,16 @@ export default function LoginPage() {
     }
   }
 
-  async function demoLogin(d: (typeof DEMO_USERS)[number]) {
+  function demoLogin(d: (typeof DEMO_USERS)[number]) {
     setError(null);
     setLoading(true);
     try {
-      // 1. First try signing in via real Firebase
-      await login(d.email, d.password);
-      router.replace("/dashboard");
-    } catch {
-      // 2. If user doesn't exist in Firebase yet, auto-register them
-      try {
-        await register({
-          name: d.name,
-          email: d.email,
-          password: d.password,
-          role: d.role,
-          shopName: "shopName" in d ? d.shopName : undefined,
-          centreName: "centreName" in d ? d.centreName : undefined,
-        });
+      const demo = loginAsDemoUser(d.email);
+      if (demo) {
         router.replace("/dashboard");
-      } catch {
-        // 3. Fallback: instant local demo session so presentation/testing NEVER fails
-        const demo = loginAsDemoUser(d.email);
-        if (demo) {
-          router.replace("/dashboard");
-          return;
-        }
-        setError("Demo sign in failed. Please try again.");
+        return;
       }
+      setError("Demo sign in failed. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -148,7 +130,7 @@ export default function LoginPage() {
         {/* Demo login buttons */}
         <div className="mt-6 rounded-xl border border-[#3A3A3A] bg-[#1C1C1C] p-4">
           <p className="text-xs text-[#6B6355] mb-3 text-center">
-            🎓 Demo logins (college demonstration only)
+            🎓 Instant Demo Logins (Click to explore)
           </p>
           <div className="space-y-2">
             {DEMO_USERS.map((d) => (

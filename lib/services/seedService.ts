@@ -1,5 +1,5 @@
 // lib/services/seedService.ts — Phase 2 seed utility
-// Creates demo batches and config in Cloud Firestore for testing.
+// Creates demo batches and config in Cloud Firestore or in-memory mock store for testing.
 
 import {
   collection,
@@ -12,6 +12,8 @@ import {
 import { db, isFirebaseConfigured } from "@/lib/firebase";
 import type { UserProfile, BatchStatus, ItemCategory, ItemPurity } from "@/lib/types";
 import { AppError } from "@/lib/types";
+import { MOCK_BATCHES, MOCK_ITEMS } from "./mockData";
+import { mockStore } from "./mockStore";
 
 interface SampleItem {
   name: string;
@@ -41,35 +43,16 @@ export async function seedDemoData(user: UserProfile): Promise<{ batchCount: num
     throw new AppError("Demo batches can only be seeded while signed in as a jeweller.");
   }
 
-  if (!isFirebaseConfigured()) {
-    throw new AppError("You are running in Demo Mode with 8 seed batches active. To seed directly into Cloud Firestore, add your Firebase keys to .env.local.");
-  }
-
-  // 1. Ensure config/app exists
-  const configRef = doc(db, "config", "app");
-  const configSnap = await getDoc(configRef);
-  let currentCounter = 100;
-  if (!configSnap.exists()) {
-    await setDoc(configRef, {
-      feePerItem: 75,
-      stuckAfterDays: 3,
-      batchCounter: 100,
-    });
-  } else {
-    currentCounter = (configSnap.data().batchCounter ?? 100) + 10;
-    await setDoc(configRef, { batchCounter: currentCounter }, { merge: true });
-  }
-
   const now = new Date();
   const d = (offsetDays: number, hour = 10) =>
     new Date(now.getTime() + offsetDays * 86400000 + (hour - 10) * 3600000);
-
   const year = now.getFullYear();
+  const randCode = Math.floor(1000 + Math.random() * 8000);
 
-  // 2. Define 4 sample batches for this jeweller
+  // 4 sample batches for this jeweller
   const sampleBatches: SampleBatch[] = [
     {
-      code: `HB-${year}-${String(currentCounter - 3).padStart(4, "0")}`,
+      code: `HB-${year}-${String(randCode + 1).padStart(4, "0")}`,
       status: "submitted" as BatchStatus,
       operatorId: null,
       operatorName: null,
@@ -84,9 +67,9 @@ export async function seedDemoData(user: UserProfile): Promise<{ batchCount: num
       ],
     },
     {
-      code: `HB-${year}-${String(currentCounter - 2).padStart(4, "0")}`,
+      code: `HB-${year}-${String(randCode + 2).padStart(4, "0")}`,
       status: "received" as BatchStatus,
-      operatorId: "demo_op_delhi",
+      operatorId: "u_delhiop",
       operatorName: "Amit Singh",
       centreName: "Delhi AHC",
       notes: "Traditional Kundan set collection",
@@ -99,9 +82,9 @@ export async function seedDemoData(user: UserProfile): Promise<{ batchCount: num
       ],
     },
     {
-      code: `HB-${year}-${String(currentCounter - 1).padStart(4, "0")}`,
+      code: `HB-${year}-${String(randCode + 3).padStart(4, "0")}`,
       status: "tested" as BatchStatus,
-      operatorId: "demo_op_delhi",
+      operatorId: "u_delhiop",
       operatorName: "Amit Singh",
       centreName: "Delhi AHC",
       notes: "Daily wear rings and chains",
@@ -114,9 +97,9 @@ export async function seedDemoData(user: UserProfile): Promise<{ batchCount: num
       ],
     },
     {
-      code: `HB-${year}-${String(currentCounter).padStart(4, "0")}`,
+      code: `HB-${year}-${String(randCode + 4).padStart(4, "0")}`,
       status: "returned" as BatchStatus,
-      operatorId: "demo_op_delhi",
+      operatorId: "u_delhiop",
       operatorName: "Amit Singh",
       centreName: "Delhi AHC",
       notes: "Export order completed batch",
@@ -129,60 +112,47 @@ export async function seedDemoData(user: UserProfile): Promise<{ batchCount: num
     },
   ];
 
-  const wb = writeBatch(db);
+  // In-memory mock seeding fallback
+  const seedInMemory = () => {
+    for (let i = 0; i < sampleBatches.length; i++) {
+      const b = sampleBatches[i];
+      const batchId = `batch_seed_${Date.now()}_${i}`;
+      const hallmarkedCount = b.items.filter((item) => item.result === "hallmarked").length;
+      const rejectedCount = b.items.filter((item) => item.result === "rejected").length;
+      const pendingCount = b.items.length - hallmarkedCount - rejectedCount;
 
-  for (const b of sampleBatches) {
-    const batchRef = doc(collection(db, "batches"));
-    const createdAt = Timestamp.fromDate(d(b.createdDaysAgo));
-    const lastChangeAt = Timestamp.fromDate(d(b.lastChangeDaysAgo));
+      MOCK_BATCHES.unshift({
+        id: batchId,
+        batchCode: b.code,
+        jewellerId: user.uid,
+        jewellerName: user.name,
+        shopName: user.shopName ?? "Jeweller Shop",
+        operatorId: b.operatorId,
+        operatorName: b.operatorName,
+        centreName: b.centreName,
+        status: b.status,
+        itemCount: b.items.length,
+        pendingCount,
+        hallmarkedCount,
+        rejectedCount,
+        feePerItem: 75,
+        estimatedFee: b.items.length * 75,
+        notes: b.notes,
+        createdAt: d(b.createdDaysAgo),
+        updatedAt: d(b.lastChangeDaysAgo),
+        lastStatusChangeAt: d(b.lastChangeDaysAgo),
+        statusHistory: [
+          { status: "submitted", changedAt: d(b.createdDaysAgo), changedByUid: user.uid, changedByName: user.name },
+          ...(b.status !== "submitted"
+            ? [{ status: b.status, changedAt: d(b.lastChangeDaysAgo), changedByUid: b.operatorId ?? user.uid, changedByName: b.operatorName ?? user.name }]
+            : []),
+        ],
+        isStuck: b.status !== "returned" && (now.getTime() - d(b.lastChangeDaysAgo).getTime()) > 3 * 86400000,
+      });
 
-    const hallmarkedCount = b.items.filter((i) => i.result === "hallmarked").length;
-    const rejectedCount = b.items.filter((i) => i.result === "rejected").length;
-    const pendingCount = b.items.length - hallmarkedCount - rejectedCount;
-
-    wb.set(batchRef, {
-      batchCode: b.code,
-      jewellerId: user.uid,
-      jewellerName: user.name,
-      shopName: user.shopName ?? "Jeweller Shop",
-      operatorId: b.operatorId,
-      operatorName: b.operatorName,
-      centreName: b.centreName,
-      status: b.status,
-      itemCount: b.items.length,
-      pendingCount,
-      hallmarkedCount,
-      rejectedCount,
-      feePerItem: 75,
-      estimatedFee: b.items.length * 75,
-      notes: b.notes,
-      createdAt,
-      updatedAt: lastChangeAt,
-      lastStatusChangeAt: lastChangeAt,
-      statusHistory: [
-        {
-          status: "submitted",
-          changedAt: createdAt,
-          changedByUid: user.uid,
-          changedByName: user.name,
-        },
-        ...(b.status !== "submitted"
-          ? [
-              {
-                status: b.status,
-                changedAt: lastChangeAt,
-                changedByUid: b.operatorId ?? user.uid,
-                changedByName: b.operatorName ?? user.name,
-              },
-            ]
-          : []),
-      ],
-      isStuck: b.status !== "returned" && (now.getTime() - d(b.lastChangeDaysAgo).getTime()) > 3 * 86400000,
-    });
-
-    for (const item of b.items) {
-      const itemRef = doc(collection(db, "batches", batchRef.id, "items"));
-      wb.set(itemRef, {
+      MOCK_ITEMS[batchId] = b.items.map((item, idx) => ({
+        id: `item_seed_${batchId}_${idx}`,
+        batchId,
         name: item.name,
         category: item.category,
         purity: item.purity,
@@ -193,26 +163,120 @@ export async function seedDemoData(user: UserProfile): Promise<{ batchCount: num
         huid: item.huid ?? null,
         rejectionReason: item.reason ?? null,
         invoiceNo: item.invoiceNo ?? null,
+        createdAt: d(b.createdDaysAgo),
+        updatedAt: d(b.lastChangeDaysAgo),
+      }));
+    }
+    mockStore.emit("batches");
+    return { batchCount: sampleBatches.length };
+  };
+
+  if (!isFirebaseConfigured() || user.uid.startsWith("u_")) {
+    return seedInMemory();
+  }
+
+  try {
+    const configRef = doc(db, "config", "app");
+    const configSnap = await getDoc(configRef);
+    let currentCounter = 100;
+    if (!configSnap.exists()) {
+      await setDoc(configRef, {
+        feePerItem: 75,
+        stuckAfterDays: 3,
+        batchCounter: 100,
+      });
+    } else {
+      currentCounter = (configSnap.data().batchCounter ?? 100) + 10;
+      await setDoc(configRef, { batchCounter: currentCounter }, { merge: true });
+    }
+
+    const wb = writeBatch(db);
+
+    for (const b of sampleBatches) {
+      const batchRef = doc(collection(db, "batches"));
+      const createdAt = Timestamp.fromDate(d(b.createdDaysAgo));
+      const lastChangeAt = Timestamp.fromDate(d(b.lastChangeDaysAgo));
+
+      const hallmarkedCount = b.items.filter((i) => i.result === "hallmarked").length;
+      const rejectedCount = b.items.filter((i) => i.result === "rejected").length;
+      const pendingCount = b.items.length - hallmarkedCount - rejectedCount;
+
+      wb.set(batchRef, {
+        batchCode: b.code,
+        jewellerId: user.uid,
+        jewellerName: user.name,
+        shopName: user.shopName ?? "Jeweller Shop",
+        operatorId: b.operatorId,
+        operatorName: b.operatorName,
+        centreName: b.centreName,
+        status: b.status,
+        itemCount: b.items.length,
+        pendingCount,
+        hallmarkedCount,
+        rejectedCount,
+        feePerItem: 75,
+        estimatedFee: b.items.length * 75,
+        notes: b.notes,
         createdAt,
         updatedAt: lastChangeAt,
+        lastStatusChangeAt: lastChangeAt,
+        statusHistory: [
+          {
+            status: "submitted",
+            changedAt: createdAt,
+            changedByUid: user.uid,
+            changedByName: user.name,
+          },
+          ...(b.status !== "submitted"
+            ? [
+                {
+                  status: b.status,
+                  changedAt: lastChangeAt,
+                  changedByUid: b.operatorId ?? user.uid,
+                  changedByName: b.operatorName ?? user.name,
+                },
+              ]
+            : []),
+        ],
+        isStuck: b.status !== "returned" && (now.getTime() - d(b.lastChangeDaysAgo).getTime()) > 3 * 86400000,
       });
 
-      // If hallmarked, register in publicHuids
-      if (item.result === "hallmarked" && item.huid) {
-        const pubRef = doc(db, "publicHuids", item.huid);
-        wb.set(pubRef, {
-          huid: item.huid,
-          articleName: item.name,
+      for (const item of b.items) {
+        const itemRef = doc(collection(db, "batches", batchRef.id, "items"));
+        wb.set(itemRef, {
+          name: item.name,
           category: item.category,
           purity: item.purity,
           weightGrams: item.weight,
-          hallmarkedAt: lastChangeAt,
-          centreName: b.centreName ?? "Delhi AHC",
+          photoUrl: null,
+          photoPath: null,
+          result: item.result ?? "pending",
+          huid: item.huid ?? null,
+          rejectionReason: item.reason ?? null,
+          invoiceNo: item.invoiceNo ?? null,
+          createdAt,
+          updatedAt: lastChangeAt,
         });
+
+        if (item.result === "hallmarked" && item.huid) {
+          const pubRef = doc(db, "publicHuids", item.huid);
+          wb.set(pubRef, {
+            huid: item.huid,
+            articleName: item.name,
+            category: item.category,
+            purity: item.purity,
+            weightGrams: item.weight,
+            hallmarkedAt: lastChangeAt,
+            centreName: b.centreName ?? "Delhi AHC",
+          });
+        }
       }
     }
-  }
 
-  await wb.commit();
-  return { batchCount: sampleBatches.length };
+    await wb.commit();
+    return { batchCount: sampleBatches.length };
+  } catch (err) {
+    console.warn("Firestore seed failed, falling back to in-memory:", err);
+    return seedInMemory();
+  }
 }

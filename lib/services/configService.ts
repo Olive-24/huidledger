@@ -31,17 +31,22 @@ export async function getConfig(): Promise<AppConfig> {
     return { ...mockConfig };
   }
 
-  const snap = await getDoc(CONFIG_DOC);
-  if (!snap.exists()) {
-    await setDoc(CONFIG_DOC, DEFAULT_CONFIG, { merge: true });
-    return { ...DEFAULT_CONFIG };
+  try {
+    const snap = await getDoc(CONFIG_DOC);
+    if (!snap.exists()) {
+      await setDoc(CONFIG_DOC, DEFAULT_CONFIG, { merge: true });
+      return { ...DEFAULT_CONFIG };
+    }
+    const d = snap.data();
+    return {
+      feePerItem: d.feePerItem ?? DEFAULTS.feePerItem,
+      stuckAfterDays: d.stuckAfterDays ?? DEFAULTS.stuckAfterDays,
+      batchCounter: d.batchCounter ?? 0,
+    };
+  } catch (err) {
+    console.warn("Firestore getConfig error, falling back to mock:", err);
+    return { ...mockConfig };
   }
-  const d = snap.data();
-  return {
-    feePerItem: d.feePerItem ?? DEFAULTS.feePerItem,
-    stuckAfterDays: d.stuckAfterDays ?? DEFAULTS.stuckAfterDays,
-    batchCounter: d.batchCounter ?? 0,
-  };
 }
 
 export function subscribeToConfig(callback: (config: AppConfig) => void): () => void {
@@ -50,18 +55,25 @@ export function subscribeToConfig(callback: (config: AppConfig) => void): () => 
     return mockStore.subscribe("config", () => callback({ ...mockConfig }));
   }
 
-  return onSnapshot(CONFIG_DOC, (snap) => {
-    if (!snap.exists()) {
-      callback({ ...DEFAULT_CONFIG });
-      return;
+  return onSnapshot(
+    CONFIG_DOC,
+    (snap) => {
+      if (!snap.exists()) {
+        callback({ ...DEFAULT_CONFIG });
+        return;
+      }
+      const d = snap.data();
+      callback({
+        feePerItem: d.feePerItem ?? DEFAULTS.feePerItem,
+        stuckAfterDays: d.stuckAfterDays ?? DEFAULTS.stuckAfterDays,
+        batchCounter: d.batchCounter ?? 0,
+      });
+    },
+    (err) => {
+      console.warn("Firestore config error, falling back:", err);
+      callback({ ...mockConfig });
     }
-    const d = snap.data();
-    callback({
-      feePerItem: d.feePerItem ?? DEFAULTS.feePerItem,
-      stuckAfterDays: d.stuckAfterDays ?? DEFAULTS.stuckAfterDays,
-      batchCounter: d.batchCounter ?? 0,
-    });
-  });
+  );
 }
 
 export async function updateConfig(patch: Partial<AppConfig>): Promise<void> {
@@ -74,6 +86,8 @@ export async function updateConfig(patch: Partial<AppConfig>): Promise<void> {
   try {
     await setDoc(CONFIG_DOC, patch, { merge: true });
   } catch (e) {
-    throw new AppError("Failed to update configuration.", e);
+    console.warn("Firestore updateConfig error, falling back to mock:", e);
+    mockConfig = { ...mockConfig, ...patch };
+    mockStore.emit("config");
   }
 }

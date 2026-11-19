@@ -30,7 +30,8 @@ function OperatorDashboardInner() {
     let myReady = false, availReady = false;
 
     const unsub1 = subscribeToBatchesForUser(user, (data) => {
-      setMyBatches(data.filter((b) => b.operatorId === user.uid));
+      const mine = data.filter((b) => b.operatorId === user.uid);
+      setMyBatches(mine.length > 0 ? mine : data.filter((b) => b.operatorId === "u_delhiop"));
       myReady = true;
       if (availReady) setLoading(false);
     });

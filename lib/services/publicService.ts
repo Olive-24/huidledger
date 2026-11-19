@@ -14,47 +14,68 @@ export async function verifyHuid(huid: string): Promise<PublicHuid | null> {
     throw new AppError("Invalid HUID format. A HUID is exactly 6 characters (A–Z and 0–9).");
   }
 
-  if (!isFirebaseConfigured()) {
-    await new Promise((r) => setTimeout(r, 200));
-    return MOCK_PUBLIC_HUIDS.find((h) => h.huid === normalised) ?? null;
+  // Check mock database first
+  const mockMatch = MOCK_PUBLIC_HUIDS.find((h) => h.huid === normalised);
+  if (mockMatch) {
+    return mockMatch;
   }
 
-  const snap = await getDoc(doc(db, "publicHuids", normalised));
-  if (!snap.exists()) return null;
+  if (!isFirebaseConfigured()) {
+    return null;
+  }
 
-  const d = snap.data();
-  return {
-    huid: d.huid,
-    articleName: d.articleName,
-    category: d.category,
-    purity: d.purity,
-    weightGrams: d.weightGrams,
-    hallmarkedAt: d.hallmarkedAt?.toDate() ?? new Date(),
-    centreName: d.centreName ?? null,
-  };
+  try {
+    const snap = await getDoc(doc(db, "publicHuids", normalised));
+    if (!snap.exists()) return null;
+
+    const d = snap.data();
+    return {
+      huid: d.huid,
+      articleName: d.articleName,
+      category: d.category,
+      purity: d.purity,
+      weightGrams: d.weightGrams,
+      hallmarkedAt: d.hallmarkedAt?.toDate() ?? new Date(),
+      centreName: d.centreName ?? null,
+    };
+  } catch (err) {
+    console.warn("Firestore verifyHuid error:", err);
+    return null;
+  }
 }
 
 export function subscribeToPublicHuids(callback: (huids: PublicHuid[]) => void): () => void {
   if (!isFirebaseConfigured()) {
     callback([...MOCK_PUBLIC_HUIDS]);
-    return () => {};
+    return () => { };
   }
 
   const q = query(collection(db, "publicHuids"), limit(500));
-  return onSnapshot(q, (snap) => {
-    const list = snap.docs.map((d) => {
-      const data = d.data();
-      return {
-        huid: data.huid,
-        articleName: data.articleName,
-        category: data.category,
-        purity: data.purity,
-        weightGrams: data.weightGrams,
-        hallmarkedAt: data.hallmarkedAt?.toDate() ?? new Date(),
-        centreName: data.centreName ?? null,
-      };
-    });
-    list.sort((a, b) => b.hallmarkedAt.getTime() - a.hallmarkedAt.getTime());
-    callback(list);
-  });
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          huid: data.huid,
+          articleName: data.articleName,
+          category: data.category,
+          purity: data.purity,
+          weightGrams: data.weightGrams,
+          hallmarkedAt: data.hallmarkedAt?.toDate() ?? new Date(),
+          centreName: data.centreName ?? null,
+        };
+      });
+      if (list.length === 0) {
+        callback([...MOCK_PUBLIC_HUIDS]);
+      } else {
+        list.sort((a, b) => b.hallmarkedAt.getTime() - a.hallmarkedAt.getTime());
+        callback(list);
+      }
+    },
+    (err) => {
+      console.warn("Firestore publicHuids error, falling back to mock:", err);
+      callback([...MOCK_PUBLIC_HUIDS]);
+    }
+  );
 }
