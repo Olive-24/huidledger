@@ -2,7 +2,7 @@
 
 import { useAuth } from "@/context/AuthContext";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { Role } from "@/lib/types";
 import { PageSpinner } from "./Spinner";
 
@@ -15,13 +15,19 @@ interface Props {
 export default function RoleGuard({ allowedRoles, children }: Props) {
   const { user, loading } = useAuth();
   const router = useRouter();
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    if (!loading && !user) router.replace("/login");
-  }, [loading, user, router]);
+    setMounted(true);
+  }, []);
 
-  if (loading) return <PageSpinner />;
-  if (!user) return <PageSpinner />;
+  useEffect(() => {
+    if (mounted && !loading && !user) {
+      router.replace("/login");
+    }
+  }, [mounted, loading, user, router]);
+
+  if (!mounted || loading || !user) return <PageSpinner />;
 
   if (!allowedRoles.includes(user.role)) {
     return (

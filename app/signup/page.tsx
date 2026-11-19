@@ -55,12 +55,17 @@ export default function SignupPage() {
 
     setLoading(true);
     try {
-      await register({ name, email, password, role, shopName: shopName || undefined, centreName: centreName || undefined });
-      router.replace("/dashboard");
+      const profile = await register({ name, email, password, role, shopName: shopName || undefined, centreName: centreName || undefined });
+      const target =
+        role === "jeweller"
+          ? "/dashboard/jeweller"
+          : role === "operator"
+            ? "/dashboard/operator"
+            : "/dashboard/auditor";
+      window.location.href = target;
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Registration failed.";
       setError(msg);
-    } finally {
       setLoading(false);
     }
   }

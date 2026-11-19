@@ -2,13 +2,20 @@
 
 import React, { createContext, useContext, useEffect, useState } from "react";
 import type { UserProfile } from "@/lib/types";
-import { subscribeToAuth, logIn, logOut, signUp } from "@/lib/services/authService";
+import {
+  subscribeToAuth,
+  logIn,
+  logOut,
+  signUp,
+  loginAsDemoUser,
+  getMockStoredUser,
+} from "@/lib/services/authService";
 import { AppError } from "@/lib/types";
 
 interface AuthContextValue {
   user: UserProfile | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<UserProfile>;
   logout: () => Promise<void>;
   register: (data: {
     name: string;
@@ -17,7 +24,8 @@ interface AuthContextValue {
     role: UserProfile["role"];
     shopName?: string;
     centreName?: string;
-  }) => Promise<void>;
+  }) => Promise<UserProfile>;
+  loginDemo: (email: string) => UserProfile | null;
   error: string | null;
   clearError: () => void;
 }
@@ -25,8 +33,12 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Eagerly initialize from local storage to prevent any redirect race condition
+  const [user, setUser] = useState<UserProfile | null>(() => getMockStoredUser());
+  const [loading, setLoading] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return !getMockStoredUser();
+  });
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -37,10 +49,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return unsub;
   }, []);
 
-  async function login(email: string, password: string) {
+  async function login(email: string, password: string): Promise<UserProfile> {
     setError(null);
     try {
-      await logIn(email, password);
+      const profile = await logIn(email, password);
+      setUser(profile);
+      setLoading(false);
+      return profile;
     } catch (e) {
       const msg = e instanceof AppError ? e.userMessage : "An unexpected error occurred.";
       setError(msg);
@@ -49,6 +64,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   async function logout() {
+    setUser(null);
     await logOut();
   }
 
@@ -59,10 +75,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     role: UserProfile["role"];
     shopName?: string;
     centreName?: string;
-  }) {
+  }): Promise<UserProfile> {
     setError(null);
     try {
-      await signUp(data);
+      const profile = await signUp(data);
+      setUser(profile);
+      setLoading(false);
+      return profile;
     } catch (e) {
       const msg = e instanceof AppError ? e.userMessage : "An unexpected error occurred.";
       setError(msg);
@@ -70,8 +89,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
+  function loginDemo(email: string): UserProfile | null {
+    setError(null);
+    const profile = loginAsDemoUser(email);
+    if (profile) {
+      setUser(profile);
+      setLoading(false);
+    }
+    return profile;
+  }
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, register, error, clearError: () => setError(null) }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        login,
+        logout,
+        register,
+        loginDemo,
+        error,
+        clearError: () => setError(null),
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

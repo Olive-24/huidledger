@@ -2,15 +2,12 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
-import { loginAsDemoUser } from "@/lib/services/authService";
 import { DEMO_USERS } from "@/lib/constants";
 import { Spinner } from "@/components/Spinner";
 
 export default function LoginPage() {
-  const { login } = useAuth();
-  const router = useRouter();
+  const { login, loginDemo } = useAuth();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,12 +20,17 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      await login(email.trim(), password);
-      router.replace("/dashboard");
+      const profile = await login(email.trim(), password);
+      const target =
+        profile.role === "jeweller"
+          ? "/dashboard/jeweller"
+          : profile.role === "operator"
+          ? "/dashboard/operator"
+          : "/dashboard/auditor";
+      window.location.href = target;
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Login failed.";
       setError(msg);
-    } finally {
       setLoading(false);
     }
   }
@@ -37,9 +39,15 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      const demo = loginAsDemoUser(d.email);
+      const demo = loginDemo(d.email);
       if (demo) {
-        router.replace("/dashboard");
+        const target =
+          d.role === "jeweller"
+            ? "/dashboard/jeweller"
+            : d.role === "operator"
+            ? "/dashboard/operator"
+            : "/dashboard/auditor";
+        window.location.href = target;
         return;
       }
       setError("Demo sign in failed. Please try again.");
@@ -135,6 +143,7 @@ export default function LoginPage() {
           <div className="space-y-2">
             {DEMO_USERS.map((d) => (
               <button
+                type="button"
                 key={d.email}
                 onClick={() => demoLogin(d)}
                 disabled={loading}
