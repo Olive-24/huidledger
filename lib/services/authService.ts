@@ -1,7 +1,6 @@
-// lib/services/authService.ts — Phase 2 Authentication service.
-// Supports both real Firebase Auth and automatic local mock fallback
-// so the dashboard and demo accounts work seamlessly even before .env.local is configured
-// or if Firebase credentials have restrictions or invalid API keys.
+// lib/services/authService.ts — Authentication service connected to real Firebase Auth & Firestore.
+// Real signups and logins use 100% real Firebase Auth.
+// Demo accounts are reserved strictly for the 1-click Demo buttons.
 
 import {
   createUserWithEmailAndPassword,
@@ -45,11 +44,11 @@ function notifyMockListeners(u: UserProfile | null) {
   mockAuthListeners.forEach((fn) => fn(u));
 }
 
-function mapAuthError(code: string): string {
+function mapAuthError(code: string, rawMessage?: string): string {
   switch (code) {
     case "auth/user-not-found":
     case "auth/invalid-credential":
-      return "No account found with this email, or password is incorrect. (If you haven't created an account yet, please click 'Sign up' below!)";
+      return "No account found with this email, or password is incorrect. (Click 'Sign up' below to create one!)";
     case "auth/wrong-password":
       return "Incorrect password. Please try again.";
     case "auth/email-already-in-use":
@@ -61,13 +60,16 @@ function mapAuthError(code: string): string {
     case "auth/invalid-email":
       return "Please enter a valid email address.";
     case "auth/operation-not-allowed":
-      return "Email/Password provider is not enabled in Firebase. Please enable it in Firebase Console -> Authentication -> Sign-in method.";
+      return "Email/Password provider is disabled in Firebase. Enable it in Firebase Console -> Authentication -> Sign-in method -> Email/Password.";
     case "auth/unauthorized-domain":
-      return "This domain is not authorized in Firebase. Please add your Vercel domain under Firebase Console -> Authentication -> Settings -> Authorized domains.";
+      return "This domain is not authorized in Firebase. Add localhost or your domain in Firebase Console -> Authentication -> Settings -> Authorized domains.";
     case "auth/api-key-not-valid":
     case "auth/invalid-api-key":
-      return "Firebase API Key is missing or invalid in environment settings.";
+      return "Firebase rejected the Web API key. Please enable 'Identity Toolkit API' in Google Cloud Console or check credentials.";
     default:
+      if (rawMessage?.includes("api-key-not-valid")) {
+        return "Firebase API Key is not valid. Please ensure 'Identity Toolkit API' is enabled in your Google Cloud Console for project 'huidledger'.";
+      }
       return code
         ? `Authentication error (${code}). Please check credentials or Firebase setup.`
         : "Authentication failed. Please check your credentials.";
@@ -93,6 +95,7 @@ async function fetchUserProfile(uid: string): Promise<UserProfile | null> {
   }
 }
 
+// Strictly for the 1-click Demo buttons
 export function loginAsDemoUser(email: string): UserProfile | null {
   const normEmail = email.trim().toLowerCase();
   let user = MOCK_USERS.find((u) => u.email === normEmail);
@@ -122,7 +125,7 @@ export function loginAsDemoUser(email: string): UserProfile | null {
 export function subscribeToAuth(callback: (user: UserProfile | null) => void): () => void {
   mockAuthListeners.add(callback);
 
-  // Initial local mock check immediately
+  // If there's an active demo session, notify immediately
   const initialMock = getMockStoredUser();
   if (initialMock) {
     callback(initialMock);
@@ -133,6 +136,7 @@ export function subscribeToAuth(callback: (user: UserProfile | null) => void): (
     return () => mockAuthListeners.delete(callback);
   }
 
+  // Real Firebase onAuthStateChanged
   const unsubFirebase = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
     if (!firebaseUser) {
       const mock = getMockStoredUser();
@@ -141,9 +145,23 @@ export function subscribeToAuth(callback: (user: UserProfile | null) => void): (
     }
     try {
       const profile = await fetchUserProfile(firebaseUser.uid);
-      callback(profile ?? getMockStoredUser());
+      if (profile) {
+        callback(profile);
+      } else {
+        // User authenticated in Firebase Auth, but user document missing in Firestore
+        const fallbackProfile: UserProfile = {
+          uid: firebaseUser.uid,
+          name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "User",
+          email: firebaseUser.email || "",
+          role: "jeweller",
+          shopName: "Jewellers Shop",
+          centreName: null,
+          createdAt: new Date(),
+        };
+        callback(fallbackProfile);
+      }
     } catch {
-      callback(getMockStoredUser());
+      callback(null);
     }
   });
 
@@ -156,33 +174,14 @@ export function subscribeToAuth(callback: (user: UserProfile | null) => void): (
 export async function logIn(email: string, password: string): Promise<UserProfile> {
   const normEmail = email.trim().toLowerCase();
 
-  const createLocalUser = (): UserProfile => {
-    let user = MOCK_USERS.find((u) => u.email === normEmail);
-    if (!user) {
-      user = {
-        uid: `u_${Date.now()}`,
-        name: normEmail.split("@")[0],
-        email: normEmail,
-        role: "jeweller",
-        shopName: "Personal Studio",
-        centreName: null,
-        createdAt: new Date(),
-      };
-      MOCK_USERS.push(user);
-    }
-    if (typeof window !== "undefined") {
-      localStorage.setItem(MOCK_SESSION_KEY, JSON.stringify(user));
-    }
-    notifyMockListeners(user);
-    return user;
-  };
-
-  // If Firebase is not configured
-  if (!isFirebaseConfigured()) {
-    return createLocalUser();
+  // If using demo credentials on login form, allow demo access
+  const demoMatch = DEMO_USERS.find((d) => d.email === normEmail);
+  if (demoMatch && password === "demo123") {
+    const demo = loginAsDemoUser(demoMatch.email);
+    if (demo) return demo;
   }
 
-  // Real Firebase Auth with resilient local fallback
+  // Real Firebase Auth
   try {
     const cred = await signInWithEmailAndPassword(auth, normEmail, password);
     let profile = await fetchUserProfile(cred.user.uid);
@@ -192,16 +191,22 @@ export async function logIn(email: string, password: string): Promise<UserProfil
         name: cred.user.displayName || normEmail.split("@")[0],
         email: normEmail,
         role: "jeweller",
-        shopName: "Jewellers Studio",
+        shopName: "Jewellers Shop",
         centreName: null,
         createdAt: new Date(),
       };
     }
+    // Clear demo session when real user logs in
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(MOCK_SESSION_KEY);
+    }
     return profile;
   } catch (e: unknown) {
-    console.warn("[Auth Notice]: Falling back to local session:", e);
-    // Fall back to local user so signing in NEVER blocks the user!
-    return createLocalUser();
+    console.error("[Real Firebase LogIn Error]:", e);
+    if (e instanceof AppError) throw e;
+    const code = (e as { code?: string }).code ?? "";
+    const msg = (e as Error)?.message ?? "";
+    throw new AppError(mapAuthError(code, msg));
   }
 }
 
@@ -230,31 +235,7 @@ export async function signUp(data: {
 }): Promise<UserProfile> {
   const normEmail = data.email.trim().toLowerCase();
 
-  const createLocalUser = (): UserProfile => {
-    let user = MOCK_USERS.find((u) => u.email === normEmail);
-    if (!user) {
-      user = {
-        uid: `u_${Date.now()}`,
-        name: data.name,
-        email: normEmail,
-        role: data.role,
-        shopName: data.shopName ?? null,
-        centreName: data.centreName ?? null,
-        createdAt: new Date(),
-      };
-      MOCK_USERS.push(user);
-    }
-    if (typeof window !== "undefined") {
-      localStorage.setItem(MOCK_SESSION_KEY, JSON.stringify(user));
-    }
-    notifyMockListeners(user);
-    return user;
-  };
-
-  if (!isFirebaseConfigured()) {
-    return createLocalUser();
-  }
-
+  // REAL Firebase Auth User Creation
   try {
     const cred = await createUserWithEmailAndPassword(auth, normEmail, data.password);
 
@@ -268,24 +249,28 @@ export async function signUp(data: {
       createdAt: new Date(),
     };
 
-    try {
-      await setDoc(doc(db, "users", cred.user.uid), {
-        uid: cred.user.uid,
-        name: data.name,
-        email: normEmail,
-        role: data.role,
-        shopName: data.shopName ?? null,
-        centreName: data.centreName ?? null,
-        createdAt: serverTimestamp(),
-      });
-    } catch (saveErr) {
-      console.warn("Could not save profile in Firestore:", saveErr);
+    // Save user profile to Cloud Firestore collection "users"
+    await setDoc(doc(db, "users", cred.user.uid), {
+      uid: cred.user.uid,
+      name: data.name,
+      email: normEmail,
+      role: data.role,
+      shopName: data.shopName ?? null,
+      centreName: data.centreName ?? null,
+      createdAt: serverTimestamp(),
+    });
+
+    // Clear any demo session
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(MOCK_SESSION_KEY);
     }
 
     return profile;
   } catch (e: unknown) {
-    console.warn("[SignUp Notice]: Falling back to local session:", e);
-    // Fall back to local user profile so sign-up ALWAYS succeeds
-    return createLocalUser();
+    console.error("[Real Firebase SignUp Error]:", e);
+    if (e instanceof AppError) throw e;
+    const code = (e as { code?: string }).code ?? "";
+    const msg = (e as Error)?.message ?? "";
+    throw new AppError(mapAuthError(code, msg));
   }
 }

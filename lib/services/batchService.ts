@@ -116,17 +116,12 @@ export function subscribeToBatchesForUser(
       q,
       (snap) => {
         const batches = snapshotToBatches(snap);
-        if (batches.length === 0) {
-          // If Firestore has no batches yet, provide sample batches so dashboard is never empty
-          callback(getMockBatchesForUser(user));
-        } else {
-          batches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-          callback(batches);
-        }
+        batches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        callback(batches);
       },
       (err) => {
-        console.warn("Firestore jeweller batches error, falling back to mock:", err);
-        callback(getMockBatchesForUser(user));
+        console.error("Firestore jeweller batches error:", err);
+        callback([]);
       }
     );
   }
@@ -144,10 +139,6 @@ export function subscribeToBatchesForUser(
       if (!unsub1Fired || !unsub2Fired) return;
       const unassignedAvailable = available.filter((b) => !b.operatorId);
       const all = [...myBatches, ...unassignedAvailable];
-      if (all.length === 0) {
-        callback(getMockBatchesForUser(user));
-        return;
-      }
       const seen = new Set<string>();
       const unique = all.filter((b) => {
         if (seen.has(b.id)) return false;
@@ -166,8 +157,10 @@ export function subscribeToBatchesForUser(
         merge();
       },
       (err) => {
-        console.warn("Firestore operator batches error:", err);
-        callback(getMockBatchesForUser(user));
+        console.error("Firestore operator batches error:", err);
+        myBatches = [];
+        unsub1Fired = true;
+        merge();
       }
     );
     const unsub2 = onSnapshot(
@@ -186,22 +179,18 @@ export function subscribeToBatchesForUser(
     };
   }
 
-  // Auditor: all batches
+  // Auditor: all batches from Firestore
   const q = query(BATCHES, limit(250));
   return onSnapshot(
     q,
     (snap) => {
       const batches = snapshotToBatches(snap);
-      if (batches.length === 0) {
-        callback([...MOCK_BATCHES]);
-      } else {
-        batches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-        callback(batches);
-      }
+      batches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      callback(batches);
     },
     (err) => {
-      console.warn("Firestore auditor batches error:", err);
-      callback([...MOCK_BATCHES]);
+      console.error("Firestore auditor batches error:", err);
+      callback([]);
     }
   );
 }
@@ -225,16 +214,12 @@ export function subscribeToAvailableBatches(callback: (batches: Batch[]) => void
     q,
     (snap) => {
       const batches = snapshotToBatches(snap).filter((b) => !b.operatorId);
-      if (batches.length === 0) {
-        callback(getMockAvailable());
-      } else {
-        batches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-        callback(batches);
-      }
+      batches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      callback(batches);
     },
     (err) => {
-      console.warn("Firestore available batches error:", err);
-      callback(getMockAvailable());
+      console.error("Firestore available batches error:", err);
+      callback([]);
     }
   );
 }

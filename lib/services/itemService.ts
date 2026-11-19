@@ -77,16 +77,12 @@ export function subscribeToItems(batchId: string, callback: (items: Item[]) => v
     itemsRef(batchId),
     (snap) => {
       const list = snap.docs.map((d) => docToItem(d.id, batchId, d.data()));
-      if (list.length === 0 && MOCK_ITEMS[batchId]) {
-        callback([...MOCK_ITEMS[batchId]]);
-      } else {
-        list.sort((a, b) => a.createdAt.getTime() - a.createdAt.getTime());
-        callback(list);
-      }
+      list.sort((a, b) => a.createdAt.getTime() - a.createdAt.getTime());
+      callback(list);
     },
     (err) => {
-      console.warn("Firestore items error, falling back to mock:", err);
-      callback([...(MOCK_ITEMS[batchId] || [])]);
+      console.error("Firestore items error:", err);
+      callback([]);
     }
   );
 }
