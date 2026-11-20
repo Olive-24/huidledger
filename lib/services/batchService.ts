@@ -10,13 +10,14 @@ import {
   limit,
   runTransaction,
   writeBatch,
+  setDoc,
   serverTimestamp,
   Timestamp,
   type QuerySnapshot,
   type DocumentData,
 } from "firebase/firestore";
 import { db, isFirebaseConfigured } from "@/lib/firebase";
-import type { Batch, BatchStatus, NewBatchForm, StatusHistoryEntry, UserProfile } from "@/lib/types";
+import type { Batch, BatchStatus, Item, NewBatchForm, StatusHistoryEntry, UserProfile } from "@/lib/types";
 import { AppError } from "@/lib/types";
 import { canMoveStatus, nextStatus } from "@/lib/rules";
 import { MOCK_BATCHES, MOCK_ITEMS } from "./mockData";
@@ -94,12 +95,77 @@ function getMockBatchesForUser(user: UserProfile): Batch[] {
   return [...result].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 }
 
+// ── Local Storage Persistence for User Batches ───────────────────────────
+
+export function loadUserBatchesFromStorage(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const rawBatches = localStorage.getItem("huidledger_custom_batches");
+    if (rawBatches) {
+      const storedBatches: Batch[] = JSON.parse(rawBatches);
+      storedBatches.forEach((sb) => {
+        sb.createdAt = new Date(sb.createdAt);
+        sb.updatedAt = new Date(sb.updatedAt);
+        sb.lastStatusChangeAt = new Date(sb.lastStatusChangeAt);
+        if (sb.statusHistory) {
+          sb.statusHistory.forEach((sh) => (sh.changedAt = new Date(sh.changedAt)));
+        }
+        if (!MOCK_BATCHES.some((b) => b.id === sb.id)) {
+          MOCK_BATCHES.unshift(sb);
+        }
+      });
+    }
+
+    const rawItems = localStorage.getItem("huidledger_custom_items");
+    if (rawItems) {
+      const storedItems: Record<string, Item[]> = JSON.parse(rawItems);
+      for (const [batchId, items] of Object.entries(storedItems)) {
+        if (!MOCK_ITEMS[batchId]) {
+          MOCK_ITEMS[batchId] = items.map((it) => ({
+            ...it,
+            createdAt: new Date(it.createdAt),
+            updatedAt: new Date(it.updatedAt),
+          }));
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("Could not load user batches from localStorage:", e);
+  }
+}
+
+export function saveUserBatchToStorage(batch: Batch, items: Item[]): void {
+  if (!MOCK_BATCHES.some((b) => b.id === batch.id)) {
+    MOCK_BATCHES.unshift(batch);
+  }
+  MOCK_ITEMS[batch.id] = items;
+
+  if (typeof window === "undefined") return;
+  try {
+    const rawBatches = localStorage.getItem("huidledger_custom_batches");
+    const storedBatches: Batch[] = rawBatches ? JSON.parse(rawBatches) : [];
+    if (!storedBatches.some((b) => b.id === batch.id)) {
+      storedBatches.unshift(batch);
+      localStorage.setItem("huidledger_custom_batches", JSON.stringify(storedBatches));
+    }
+
+    const rawItems = localStorage.getItem("huidledger_custom_items");
+    const storedItems: Record<string, Item[]> = rawItems ? JSON.parse(rawItems) : {};
+    storedItems[batch.id] = items;
+    localStorage.setItem("huidledger_custom_items", JSON.stringify(storedItems));
+  } catch (e) {
+    console.warn("Could not save batch to localStorage:", e);
+  }
+}
+
 // ── Subscriptions ────────────────────────────────────────────────────────
 
 export function subscribeToBatchesForUser(
   user: UserProfile,
   callback: (batches: Batch[]) => void
 ): () => void {
+  loadUserBatchesFromStorage();
+
   // If demo user or UID starts with u_ or Firebase not configured:
   if (!isFirebaseConfigured() || user.uid.startsWith("u_")) {
     const send = () => {
@@ -110,20 +176,42 @@ export function subscribeToBatchesForUser(
   }
 
   // Real Firestore onSnapshot
+  let firestoreBatches: Batch[] = [];
+
+  const getCombined = () => {
+    const localBatches = MOCK_BATCHES.filter((b) => b.jewellerId === user.uid);
+    const map = new Map<string, Batch>();
+    localBatches.forEach((b) => map.set(b.id, b));
+    firestoreBatches.forEach((b) => map.set(b.id, b));
+    const combined = Array.from(map.values());
+    combined.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return combined;
+  };
+
+  const notify = () => {
+    callback(getCombined());
+  };
+
+  const unsubMock = mockStore.subscribe("batches", notify);
+
   if (user.role === "jeweller") {
     const q = query(BATCHES, where("jewellerId", "==", user.uid));
-    return onSnapshot(
+    const unsubFs = onSnapshot(
       q,
       (snap) => {
-        const batches = snapshotToBatches(snap);
-        batches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-        callback(batches);
+        firestoreBatches = snapshotToBatches(snap);
+        notify();
       },
       (err) => {
-        console.error("Firestore jeweller batches error:", err);
-        callback([]);
+        console.warn("Firestore jeweller batches warning:", err);
+        notify();
       }
     );
+    notify();
+    return () => {
+      unsubFs();
+      unsubMock();
+    };
   }
 
   if (user.role === "operator") {
@@ -132,19 +220,15 @@ export function subscribeToBatchesForUser(
 
     let myBatches: Batch[] = [];
     let available: Batch[] = [];
-    let unsub1Fired = false;
-    let unsub2Fired = false;
 
     function merge() {
-      if (!unsub1Fired || !unsub2Fired) return;
-      const unassignedAvailable = available.filter((b) => !b.operatorId);
-      const all = [...myBatches, ...unassignedAvailable];
-      const seen = new Set<string>();
-      const unique = all.filter((b) => {
-        if (seen.has(b.id)) return false;
-        seen.add(b.id);
-        return true;
-      });
+      const localBatches = MOCK_BATCHES.filter(
+        (b) => b.operatorId === user.uid || (b.status === "submitted" && !b.operatorId)
+      );
+      const all = [...localBatches, ...myBatches, ...available.filter((b) => !b.operatorId)];
+      const map = new Map<string, Batch>();
+      all.forEach((b) => map.set(b.id, b));
+      const unique = Array.from(map.values());
       unique.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       callback(unique);
     }
@@ -153,46 +237,42 @@ export function subscribeToBatchesForUser(
       myBatchesQ,
       (snap) => {
         myBatches = snapshotToBatches(snap);
-        unsub1Fired = true;
         merge();
       },
-      (err) => {
-        console.error("Firestore operator batches error:", err);
-        myBatches = [];
-        unsub1Fired = true;
-        merge();
-      }
+      () => { merge(); }
     );
     const unsub2 = onSnapshot(
       availableQ,
       (snap) => {
         available = snapshotToBatches(snap);
-        unsub2Fired = true;
         merge();
       },
-      () => { }
+      () => { merge(); }
     );
+    merge();
 
     return () => {
       unsub1();
       unsub2();
+      unsubMock();
     };
   }
 
-  // Auditor: all batches from Firestore
+  // Auditor: all batches from Firestore + mock
   const q = query(BATCHES, limit(250));
-  return onSnapshot(
+  const unsubFs = onSnapshot(
     q,
     (snap) => {
-      const batches = snapshotToBatches(snap);
-      batches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-      callback(batches);
+      firestoreBatches = snapshotToBatches(snap);
+      notify();
     },
-    (err) => {
-      console.error("Firestore auditor batches error:", err);
-      callback([]);
-    }
+    () => { notify(); }
   );
+  notify();
+  return () => {
+    unsubFs();
+    unsubMock();
+  };
 }
 
 export function subscribeToAvailableBatches(callback: (batches: Batch[]) => void): () => void {
@@ -225,6 +305,7 @@ export function subscribeToAvailableBatches(callback: (batches: Batch[]) => void
 }
 
 export function subscribeToBatch(id: string, callback: (batch: Batch | null) => void): () => void {
+  loadUserBatchesFromStorage();
   const mockBatch = MOCK_BATCHES.find((b) => b.id === id);
   if (mockBatch || !isFirebaseConfigured() || id.startsWith("demo-batch") || id.startsWith("batch_")) {
     const send = () => {
@@ -259,76 +340,15 @@ export async function createBatch(user: UserProfile, form: NewBatchForm): Promis
 
   const config = await getConfig();
   const year = new Date().getFullYear();
+  const feePerItem = config.feePerItem;
+  const batchCode = `HB-${year}-${String(Math.floor(1000 + Math.random() * 9000))}`;
 
-  if (!isFirebaseConfigured() || user.uid.startsWith("u_")) {
-    config.batchCounter += 1;
-    const batchId = `batch_${Date.now()}`;
-    const batchCode = `HB-${year}-${String(config.batchCounter).padStart(4, "0")}`;
-    const now = new Date();
-    const feePerItem = config.feePerItem;
-
-    const newBatch: Batch = {
-      id: batchId,
-      batchCode,
-      jewellerId: user.uid,
-      jewellerName: user.name,
-      shopName: user.shopName,
-      operatorId: null,
-      operatorName: null,
-      centreName: null,
-      status: "submitted",
-      itemCount: form.items.length,
-      pendingCount: form.items.length,
-      hallmarkedCount: 0,
-      rejectedCount: 0,
-      feePerItem,
-      estimatedFee: form.items.length * feePerItem,
-      notes: form.notes || null,
-      createdAt: now,
-      updatedAt: now,
-      lastStatusChangeAt: now,
-      statusHistory: [
-        { status: "submitted", changedAt: now, changedByUid: user.uid, changedByName: user.name },
-      ],
-      isStuck: false,
-    };
-
-    MOCK_BATCHES.push(newBatch);
-
-    MOCK_ITEMS[batchId] = form.items.map((f, i) => ({
-      id: `${batchId}_item${i + 1}`,
-      batchId,
-      name: f.name,
-      category: f.category,
-      purity: f.purity,
-      weightGrams: f.weightGrams,
-      photoUrl: f.photoUrl || null,
-      photoPath: f.photoPath || null,
-      result: "pending" as const,
-      huid: null,
-      rejectionReason: null,
-      invoiceNo: f.invoiceNo || null,
-      createdAt: now,
-      updatedAt: now,
-    }));
-
-    mockStore.emit("batches");
-    mockStore.emit(`batch:${batchId}`);
-    return batchId;
-  }
-
-  // Real Firestore write
-  try {
-    const configRef = doc(db, "config", "app");
-    const batchRef = doc(collection(db, "batches"));
-    const now = serverTimestamp();
-    const feePerItem = config.feePerItem;
-
-    let batchCode = "";
-    await runTransaction(db, async (tx) => {
-      const cSnap = await tx.get(configRef);
-      const counter = (cSnap.exists() ? (cSnap.data().batchCounter ?? 0) : 0) + 1;
-      batchCode = `HB-${year}-${String(counter).padStart(4, "0")}`;
+  // Try real Firestore write if configured
+  if (isFirebaseConfigured() && !user.uid.startsWith("u_")) {
+    try {
+      const batchRef = doc(collection(db, "batches"));
+      const batchId = batchRef.id;
+      const now = serverTimestamp();
 
       const historyEntry = {
         status: "submitted",
@@ -337,7 +357,7 @@ export async function createBatch(user: UserProfile, form: NewBatchForm): Promis
         changedByName: user.name,
       };
 
-      tx.set(batchRef, {
+      await setDoc(batchRef, {
         batchCode,
         jewellerId: user.uid,
         jewellerName: user.name,
@@ -360,86 +380,131 @@ export async function createBatch(user: UserProfile, form: NewBatchForm): Promis
         isStuck: false,
       });
 
-      tx.set(configRef, { batchCounter: counter }, { merge: true });
-    });
+      const wb = writeBatch(db);
+      form.items.forEach((item) => {
+        const itemRef = doc(collection(db, "batches", batchId, "items"));
+        wb.set(itemRef, {
+          name: item.name,
+          category: item.category,
+          purity: item.purity,
+          weightGrams: item.weightGrams,
+          photoUrl: item.photoUrl || null,
+          photoPath: item.photoPath || null,
+          result: "pending",
+          huid: null,
+          rejectionReason: null,
+          invoiceNo: item.invoiceNo || null,
+          createdAt: now,
+          updatedAt: now,
+        });
+      });
+      await wb.commit();
 
-    const wb = writeBatch(db);
-    form.items.forEach((item) => {
-      const itemRef = doc(collection(db, "batches", batchRef.id, "items"));
-      wb.set(itemRef, {
-        name: item.name,
-        category: item.category,
-        purity: item.purity,
-        weightGrams: item.weightGrams,
-        photoUrl: item.photoUrl || null,
-        photoPath: item.photoPath || null,
-        result: "pending",
+      const nowDate = new Date();
+      const newBatch: Batch = {
+        id: batchId,
+        batchCode,
+        jewellerId: user.uid,
+        jewellerName: user.name,
+        shopName: user.shopName,
+        operatorId: null,
+        operatorName: null,
+        centreName: null,
+        status: "submitted",
+        itemCount: form.items.length,
+        pendingCount: form.items.length,
+        hallmarkedCount: 0,
+        rejectedCount: 0,
+        feePerItem,
+        estimatedFee: form.items.length * feePerItem,
+        notes: form.notes || null,
+        createdAt: nowDate,
+        updatedAt: nowDate,
+        lastStatusChangeAt: nowDate,
+        statusHistory: [
+          { status: "submitted", changedAt: nowDate, changedByUid: user.uid, changedByName: user.name },
+        ],
+        isStuck: false,
+      };
+
+      const newItems: Item[] = form.items.map((f, i) => ({
+        id: `${batchId}_item${i + 1}`,
+        batchId,
+        name: f.name,
+        category: f.category,
+        purity: f.purity,
+        weightGrams: f.weightGrams,
+        photoUrl: f.photoUrl || null,
+        photoPath: f.photoPath || null,
+        result: "pending" as const,
         huid: null,
         rejectionReason: null,
-        invoiceNo: item.invoiceNo || null,
-        createdAt: now,
-        updatedAt: now,
-      });
-    });
-    await wb.commit();
+        invoiceNo: f.invoiceNo || null,
+        createdAt: nowDate,
+        updatedAt: nowDate,
+      }));
 
-    return batchRef.id;
-  } catch (err) {
-    console.warn("Firestore createBatch error, falling back to mock:", err);
-    // Fall back to mock batch creation so operation succeeds
-    const batchId = `batch_${Date.now()}`;
-    const batchCode = `HB-${year}-${String(Date.now()).slice(-4)}`;
-    const now = new Date();
-    const feePerItem = config.feePerItem;
+      saveUserBatchToStorage(newBatch, newItems);
+      mockStore.emit("batches");
+      mockStore.emit(`batch:${batchId}`);
 
-    const newBatch: Batch = {
-      id: batchId,
-      batchCode,
-      jewellerId: user.uid,
-      jewellerName: user.name,
-      shopName: user.shopName,
-      operatorId: null,
-      operatorName: null,
-      centreName: null,
-      status: "submitted",
-      itemCount: form.items.length,
-      pendingCount: form.items.length,
-      hallmarkedCount: 0,
-      rejectedCount: 0,
-      feePerItem,
-      estimatedFee: form.items.length * feePerItem,
-      notes: form.notes || null,
-      createdAt: now,
-      updatedAt: now,
-      lastStatusChangeAt: now,
-      statusHistory: [
-        { status: "submitted", changedAt: now, changedByUid: user.uid, changedByName: user.name },
-      ],
-      isStuck: false,
-    };
-
-    MOCK_BATCHES.push(newBatch);
-    MOCK_ITEMS[batchId] = form.items.map((f, i) => ({
-      id: `${batchId}_item${i + 1}`,
-      batchId,
-      name: f.name,
-      category: f.category,
-      purity: f.purity,
-      weightGrams: f.weightGrams,
-      photoUrl: f.photoUrl || null,
-      photoPath: f.photoPath || null,
-      result: "pending" as const,
-      huid: null,
-      rejectionReason: null,
-      invoiceNo: f.invoiceNo || null,
-      createdAt: now,
-      updatedAt: now,
-    }));
-
-    mockStore.emit("batches");
-    mockStore.emit(`batch:${batchId}`);
-    return batchId;
+      return batchId;
+    } catch (err) {
+      console.warn("Firestore createBatch error, falling back to local/mock:", err);
+    }
   }
+
+  // Fall back to mock batch creation so operation succeeds reliably
+  const batchId = `batch_${Date.now()}`;
+  const nowDate = new Date();
+
+  const newBatch: Batch = {
+    id: batchId,
+    batchCode,
+    jewellerId: user.uid,
+    jewellerName: user.name,
+    shopName: user.shopName,
+    operatorId: null,
+    operatorName: null,
+    centreName: null,
+    status: "submitted",
+    itemCount: form.items.length,
+    pendingCount: form.items.length,
+    hallmarkedCount: 0,
+    rejectedCount: 0,
+    feePerItem,
+    estimatedFee: form.items.length * feePerItem,
+    notes: form.notes || null,
+    createdAt: nowDate,
+    updatedAt: nowDate,
+    lastStatusChangeAt: nowDate,
+    statusHistory: [
+      { status: "submitted", changedAt: nowDate, changedByUid: user.uid, changedByName: user.name },
+    ],
+    isStuck: false,
+  };
+
+  const newItems: Item[] = form.items.map((f, i) => ({
+    id: `${batchId}_item${i + 1}`,
+    batchId,
+    name: f.name,
+    category: f.category,
+    purity: f.purity,
+    weightGrams: f.weightGrams,
+    photoUrl: f.photoUrl || null,
+    photoPath: f.photoPath || null,
+    result: "pending" as const,
+    huid: null,
+    rejectionReason: null,
+    invoiceNo: f.invoiceNo || null,
+    createdAt: nowDate,
+    updatedAt: nowDate,
+  }));
+
+  saveUserBatchToStorage(newBatch, newItems);
+  mockStore.emit("batches");
+  mockStore.emit(`batch:${batchId}`);
+  return batchId;
 }
 
 export async function claimBatch(user: UserProfile, batchId: string): Promise<void> {

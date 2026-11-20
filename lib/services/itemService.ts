@@ -65,6 +65,25 @@ function recalcMockBatch(batchId: string) {
 }
 
 export function subscribeToItems(batchId: string, callback: (items: Item[]) => void): () => void {
+  // If not in memory yet, check if items are stored in localStorage
+  if (!MOCK_ITEMS[batchId] && typeof window !== "undefined") {
+    try {
+      const raw = localStorage.getItem("huidledger_custom_items");
+      if (raw) {
+        const stored = JSON.parse(raw);
+        if (stored[batchId]) {
+          MOCK_ITEMS[batchId] = stored[batchId].map((it: Item) => ({
+            ...it,
+            createdAt: new Date(it.createdAt),
+            updatedAt: new Date(it.updatedAt),
+          }));
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   const hasMock = Boolean(MOCK_ITEMS[batchId]);
   if (hasMock || !isFirebaseConfigured() || batchId.startsWith("demo-batch") || batchId.startsWith("batch_")) {
     callback([...(MOCK_ITEMS[batchId] || [])]);
